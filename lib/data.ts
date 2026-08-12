@@ -231,6 +231,59 @@ export async function fetchFxRate(source: string, destination: string): Promise<
   return null;
 }
 
+export const FALLBACK_FX_RATES: Record<string, number> = {
+  NGN: 1900,
+  ZWL: 8600,
+  KES: 165,
+  GHS: 18,
+  UGX: 5000,
+  TZS: 3100,
+  ZAR: 22,
+  XAF: 830,
+  RWF: 1500,
+  ZMW: 32,
+};
+
+export async function estimateFxQuote(amountGbp: number, destinationCurrency: string) {
+  const resolvedCurrency = (destinationCurrency || 'NGN').toUpperCase();
+  const rate = (await fetchFxRate('GBP', resolvedCurrency)) ?? FALLBACK_FX_RATES[resolvedCurrency] ?? 1;
+  const amountDestination = Number((amountGbp * rate).toFixed(2));
+  const estimatedFee = Number((amountGbp * 0.015).toFixed(2));
+  const totalCharge = Number((amountGbp + estimatedFee).toFixed(2));
+
+  return {
+    rate,
+    amountDestination,
+    estimatedFee,
+    totalCharge,
+    destinationCurrency: resolvedCurrency,
+  };
+}
+
+export async function sendPlanTransfers(planId: string) {
+  const { data, error } = await supabase.functions.invoke('flutterwave-plan-send', {
+    body: { planId },
+  });
+
+  if (error) {
+    throw new Error(error.message || 'Unable to start the transfer batch.');
+  }
+
+  return data;
+}
+
+export async function fetchTransferStatus(transferId: string) {
+  const { data, error } = await supabase.functions.invoke('flutterwave-transfer-status', {
+    body: { transfer_id: transferId },
+  });
+
+  if (error) {
+    throw new Error(error.message || 'Unable to fetch transfer status.');
+  }
+
+  return data;
+}
+
 export function getCountryInfo(code: string) {
   const { COUNTRIES } = require('@/lib/theme');
   return COUNTRIES.find((c: { code: string }) => c.code === code);

@@ -74,7 +74,7 @@ export default function HomeScreen() {
 
   if (loading) return <Loading />;
 
-  const activePlans = plans.filter((p) => p.status === 'draft' || p.status === 'confirmed');
+  const activePlans = plans.filter((p) => p.status === 'draft' || p.status === 'approved' || p.status === 'confirmed');
   const completedPlans = plans.filter((p) => p.status === 'completed');
   const totalSent = transactions
     .filter((t) => t.status === 'successful')

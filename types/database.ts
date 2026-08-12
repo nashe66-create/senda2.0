@@ -1,6 +1,6 @@
 export type KycStatus = 'unverified' | 'pending' | 'verified' | 'rejected';
 export type ReceivingMethod = 'mobile_money' | 'bank_account' | 'cash_pickup' | 'bill_payment';
-export type PlanStatus = 'draft' | 'confirmed' | 'processing' | 'completed' | 'failed';
+export type PlanStatus = 'draft' | 'approved' | 'confirmed' | 'processing' | 'completed' | 'failed';
 export type CommitmentStatus = 'pending' | 'processing' | 'completed' | 'failed';
 export type TransactionStatus = 'pending' | 'successful' | 'failed' | 'refunded';
 export type RecurringType = 'one_off' | 'weekly' | 'biweekly' | 'monthly';

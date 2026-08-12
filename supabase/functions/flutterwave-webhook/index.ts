@@ -27,8 +27,56 @@ Deno.serve(async (req: Request) => {
 
     const supabase = createClient(supabaseUrl, serviceRoleKey);
     const data = event.data ?? event;
-    const reference = data.tx_ref ?? data.reference ?? data.transfer_reference;
-    const status = String(data.status ?? "").toLowerCase();
+    const reference = data.tx_ref ?? data.reference ?? data.transfer_reference ?? data.meta?.reference;
+    const transferId = String(data.id ?? data.transfer_id ?? data.data?.id ?? data.data?.transfer_id ?? "");
+    const status = String(data.status ?? data.state ?? "").toLowerCase();
+
+    const planReferenceMatch = typeof reference === "string" && reference.startsWith("plan_")
+      ? reference.match(/^plan_(.+)_(.+)$/)
+      : null;
+
+    if (planReferenceMatch && planReferenceMatch[1] && planReferenceMatch[2]) {
+      const [, planId, commitmentId] = planReferenceMatch;
+      const normalizedStatus = status === "successful" || status === "completed"
+        ? "completed"
+        : status === "failed"
+          ? "failed"
+          : status === "processing" || status === "pending"
+            ? "processing"
+            : "pending";
+
+      await supabase
+        .from("commitments")
+        .update({
+          status: normalizedStatus,
+          flutterwave_transfer_id: transferId || null,
+          failure_reason: normalizedStatus === "failed" ? String(data.message ?? "Transfer failed") : null,
+        })
+        .eq("plan_id", planId)
+        .eq("id", commitmentId);
+
+      const { data: allCommitments, error: fetchError } = await supabase
+        .from("commitments")
+        .select("status")
+        .eq("plan_id", planId);
+
+      if (!fetchError && allCommitments) {
+        const total = allCommitments.length;
+        const completedCount = allCommitments.filter((c: any) => String(c.status).toLowerCase() === "completed").length;
+        const failedCount = allCommitments.filter((c: any) => String(c.status).toLowerCase() === "failed").length;
+        const processingCount = allCommitments.filter((c: any) => String(c.status).toLowerCase() === "processing").length;
+
+        let nextPlanStatus = "processing";
+        if (total > 0 && completedCount === total) nextPlanStatus = "completed";
+        else if (failedCount === total) nextPlanStatus = "failed";
+        else if (processingCount > 0 || completedCount > 0) nextPlanStatus = "processing";
+
+        await supabase
+          .from("plans")
+          .update({ status: nextPlanStatus })
+          .eq("id", planId);
+      }
+    }
 
     if (reference && (status === "successful" || status === "completed" || status === "failed")) {
       const transactionStatus = status === "successful" || status === "completed" ? "successful" : "failed";
@@ -36,7 +84,7 @@ Deno.serve(async (req: Request) => {
         .from("transactions")
         .update({
           status: transactionStatus,
-          flutterwave_payment_id: String(data.id ?? data.transfer_id ?? ""),
+          flutterwave_payment_id: transferId || String(data.id ?? data.transfer_id ?? ""),
           completed_at: transactionStatus === "successful" ? new Date().toISOString() : null,
         })
         .eq("payment_reference", reference);

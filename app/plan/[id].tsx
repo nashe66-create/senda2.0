@@ -9,6 +9,9 @@ import {
   Alert,
   Modal,
   ViewStyle,
+  Keyboard,
+  TouchableWithoutFeedback,
+  TextInput,
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import {
@@ -45,6 +48,8 @@ import {
   formatDate,
   getReceivingMethodLabel,
   getRecurringLabel,
+  estimateFxQuote,
+  sendPlanTransfers,
 } from '@/lib/data';
 import { PlanWithCommitments, Recipient, ReceivingMethod, CommitmentWithRecipient } from '@/types/database';
 
@@ -64,6 +69,13 @@ export default function PlanDetailScreen() {
   const [showAddCommitment, setShowAddCommitment] = useState(false);
   const [selectedRecipientId, setSelectedRecipientId] = useState<string | null>(null);
   const [amountGbp, setAmountGbp] = useState('');
+  const [quote, setQuote] = useState<{
+    rate: number;
+    amountDestination: number;
+    estimatedFee: number;
+    totalCharge: number;
+    destinationCurrency: string;
+  } | null>(null);
   const [commitmentError, setCommitmentError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
 
@@ -95,6 +107,26 @@ export default function PlanDetailScreen() {
     loadPlan();
   };
 
+  const updateQuote = useCallback(async () => {
+    const selectedRecipient = recipients.find((r) => r.id === selectedRecipientId);
+    const amount = Number.parseFloat(amountGbp || '0');
+    if (!selectedRecipient || !amount || amount <= 0) {
+      setQuote(null);
+      return;
+    }
+
+    const country = COUNTRIES.find((c) => c.code === selectedRecipient.country);
+    const destinationCurrency = country?.currency || 'NGN';
+    const nextQuote = await estimateFxQuote(amount, destinationCurrency);
+    setQuote(nextQuote);
+  }, [amountGbp, recipients, selectedRecipientId]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void updateQuote();
+    }, [updateQuote])
+  );
+
   const handleAddCommitment = async () => {
     if (!selectedRecipientId) {
       setCommitmentError('Please select a recipient');
@@ -110,7 +142,8 @@ export default function PlanDetailScreen() {
     if (!recipient) return;
 
     const country = COUNTRIES.find((c) => c.code === recipient.country);
-    const destinationCurrency = country?.currency || 'USD';
+    const destinationCurrency = country?.currency || 'NGN';
+    const quoteForCommitment = quote ?? (await estimateFxQuote(amount, destinationCurrency));
 
     setAdding(true);
     setCommitmentError(null);
@@ -121,13 +154,14 @@ export default function PlanDetailScreen() {
         amount_gbp: amount,
         destination_currency: destinationCurrency,
         receiving_method: recipient.receiving_method,
-        amount_destination: 0,
-        fx_rate: 0,
+        amount_destination: quoteForCommitment.amountDestination,
+        fx_rate: quoteForCommitment.rate,
       });
       await recalcPlanTotals(id);
       setShowAddCommitment(false);
       setSelectedRecipientId(null);
       setAmountGbp('');
+      setQuote(null);
       await loadPlan();
     } catch (e: any) {
       setCommitmentError(e.message || 'Failed to add commitment');
@@ -155,19 +189,62 @@ export default function PlanDetailScreen() {
     );
   };
 
-  const handleConfirmPlan = () => {
+  const handleApprovePlan = () => {
     if (!plan || plan.commitments.length === 0) return;
+
+    const summary = plan.commitments
+      .map((commitment) => {
+        const fxRateText = commitment.fx_rate > 0 ? `@ ${commitment.fx_rate} ${commitment.destination_currency}` : 'FX rate pending';
+        return `• ${commitment.recipient?.name ?? 'Recipient'}: ${formatGBP(Number(commitment.amount_gbp))} → ${formatCurrency(Number(commitment.amount_destination || 0), commitment.destination_currency)} (${fxRateText})`;
+      })
+      .join('\n');
+
     Alert.alert(
-      'Confirm Plan',
-      `This will debit ${formatGBP(Number(plan.total_gbp))} from your account and route ${plan.commitments.length} transfer${plan.commitments.length !== 1 ? 's' : ''} via Flutterwave. Continue?`,
+      'Approve plan',
+      `This saves the plan and gets it ready to send. It does not trigger payment yet.\n\n${summary}\n\nApprove this plan?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Confirm & Pay',
+          text: 'Approve Plan',
           onPress: async () => {
-            await updatePlan(id, { status: 'confirmed' });
+            await updatePlan(id, { status: 'approved' });
             await loadPlan();
-            Alert.alert('Plan Confirmed', 'Your payment is being processed. You can track progress in the Activity tab.');
+            Alert.alert('Plan approved', 'The plan is ready to send. You can send funds when you are ready.');
+          },
+        },
+      ]
+    );
+  };
+
+  const handleSendPlan = async () => {
+    if (!plan || plan.commitments.length === 0) return;
+
+    const summary = plan.commitments
+      .map((commitment) => {
+        const value = commitment.amount_destination > 0
+          ? formatCurrency(Number(commitment.amount_destination), commitment.destination_currency)
+          : 'Awaiting quote';
+        return `• ${commitment.recipient?.name ?? 'Recipient'}: ${value}`;
+      })
+      .join('\n');
+
+    Alert.alert(
+      'Send funds',
+      `This will initiate a Flutterwave transfer for ${formatGBP(Number(plan.total_gbp))}.\n\n${summary}\n\nContinue?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Send Now',
+          onPress: async () => {
+            try {
+              if (!plan) return;
+              const result = await sendPlanTransfers(plan.id);
+              await updatePlan(id, { status: 'processing' });
+              await loadPlan();
+              Alert.alert('Transfer started', `${result.total} transfer${result.total !== 1 ? 's' : ''} initiated via Flutterwave.`);
+            } catch (error: any) {
+              Alert.alert('Send failed', error?.message || 'Unable to start transfer.');
+            }
           },
         },
       ]
@@ -360,13 +437,23 @@ export default function PlanDetailScreen() {
           })
         )}
 
-        {canEdit && plan.commitments.length > 0 && (
+        {canEdit && plan.commitments.length > 0 && plan.status === 'draft' && (
           <Button
-            onPress={handleConfirmPlan}
+            onPress={handleApprovePlan}
             style={styles.confirmBtn}
           >
             <CheckCircle2 color="#fff" size={20} strokeWidth={2} />
-            {'  '}Confirm & Pay {formatGBP(Number(plan.total_gbp))}
+            {'  '}Approve Plan
+          </Button>
+        )}
+
+        {plan.status === 'approved' && plan.commitments.length > 0 && (
+          <Button
+            onPress={handleSendPlan}
+            style={styles.confirmBtn}
+          >
+            <CheckCircle2 color="#fff" size={20} strokeWidth={2} />
+            {'  '}Send Now {formatGBP(Number(plan.total_gbp))}
           </Button>
         )}
 
@@ -452,17 +539,31 @@ export default function PlanDetailScreen() {
                 <Text style={[styles.modalLabel, { marginTop: Spacing.md }]}>
                   Amount in GBP
                 </Text>
-                <View style={styles.amountInputWrap}>
-                  <Text style={styles.amountPrefix}>£</Text>
-                  <TextInput
-                    style={styles.amountInput}
-                    value={amountGbp}
-                    onChangeText={setAmountGbp}
-                    placeholder="0.00"
-                    placeholderTextColor={Colors.neutral[400]}
-                    keyboardType="numeric"
-                  />
-                </View>
+                <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+                  <View style={styles.amountInputWrap}>
+                    <Text style={styles.amountPrefix}>£</Text>
+                    <TextInput
+                      style={styles.amountInput}
+                      value={amountGbp}
+                      onChangeText={setAmountGbp}
+                      placeholder="0.00"
+                      placeholderTextColor={Colors.neutral[400]}
+                      keyboardType="numeric"
+                      returnKeyType="done"
+                      onSubmitEditing={Keyboard.dismiss}
+                    />
+                  </View>
+                </TouchableWithoutFeedback>
+
+                {quote && (
+                  <View style={styles.quoteBox}>
+                    <Text style={styles.quoteLabel}>Preview</Text>
+                    <Text style={styles.quoteText}>Rate: 1 GBP = {quote.rate.toFixed(2)} {quote.destinationCurrency}</Text>
+                    <Text style={styles.quoteText}>Receiver gets: {formatCurrency(quote.amountDestination, quote.destinationCurrency)}</Text>
+                    <Text style={styles.quoteText}>Transfer fee: {formatGBP(quote.estimatedFee)}</Text>
+                    <Text style={styles.quoteText}>Total charge: {formatGBP(quote.totalCharge)}</Text>
+                  </View>
+                )}
 
                 {commitmentError && (
                   <Text style={styles.commitmentErrorText}>{commitmentError}</Text>
@@ -483,8 +584,6 @@ export default function PlanDetailScreen() {
     </View>
   );
 }
-
-import { TextInput } from 'react-native';
 
 const styles = StyleSheet.create({
   container: {
@@ -803,6 +902,22 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontFamily: 'Inter-SemiBold',
     color: Colors.neutral[900],
+  },
+  quoteBox: {
+    backgroundColor: Colors.primary[50],
+    borderRadius: 12,
+    padding: Spacing.md,
+    marginBottom: Spacing.md,
+  },
+  quoteLabel: {
+    ...Typography.label,
+    color: Colors.primary[700],
+    marginBottom: Spacing.xs,
+  },
+  quoteText: {
+    ...Typography.caption,
+    color: Colors.neutral[700],
+    marginBottom: 4,
   },
   commitmentErrorText: {
     ...Typography.caption,

@@ -5,6 +5,7 @@ import { PlanStatus, CommitmentStatus, TransactionStatus, KycStatus } from '@/ty
 function statusConfig(status: string): { bg: string; text: string; label: string } {
   const map: Record<string, { bg: string; text: string; label: string }> = {
     draft: { bg: Colors.neutral[200], text: Colors.neutral[700], label: 'Draft' },
+    approved: { bg: Colors.primary[50], text: Colors.primary[700], label: 'Approved' },
     confirmed: { bg: Colors.primary[50], text: Colors.primary[700], label: 'Confirmed' },
     processing: { bg: Colors.warning[50], text: Colors.warning[700], label: 'Processing' },
     completed: { bg: Colors.success[50], text: Colors.success[700], label: 'Completed' },
